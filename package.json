@@ -1,7 +1,7 @@
 {
   "name": "buildit",
   "version": "0.0.1",
-  "bin": "./bin/cli.js",
+  "bin": "./bin/buildit",
   "dependencies": {
     "express": "*",
     "argparser": "*",

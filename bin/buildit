@@ -42,16 +42,33 @@ function chain(funcs) {
 
   var i = -1;
   function next() {
+    var args;
     i++;
-    var args = Array.prototype.slice.call(arguments).concat([next]);
     if (funcs[i]) {
+      args = Array.prototype.slice.call(arguments);
+      if (funcs[i].name !== 'next') {
+        args = args.concat([next]);
+      } else {
+        funcs[i].parent = next;
+      }
+
       funcs[i].apply(null, args);
+    } else if (next.parent) {
+      args = Array.prototype.slice.call(arguments);
+      next.parent.apply(null, args);
     }
   }
   return next;
 }
 
-var update_branch = function(config, req, res, next) {
+function exec_logger(stage) {
+  return function(error, stdout, stderr, next) {
+    console.log(stage, Object.prototype.toString.call(next));
+    next();
+  };
+}
+
+var update = function(config, req, res, next) {
   exec(sprintf('cd %s/repo; git pull origin; git branch -r', config.destination), function(err, stdout, stderr) {
     // parse output for branches
     var branchre = /origin\/([^\s*]+)/g,
@@ -68,29 +85,61 @@ var update_branch = function(config, req, res, next) {
     });
 
     branches.forEach(function(branch) {
-      var branchpath = path.join(config.destination, 'branches', branch);
+      var branchpath = path.join(config.destination, 'branches', branch),
+          repopath = path.join(branchpath, 'repo');
 
-      path.exists(branchpath, function(exists) {
-        function update() {
+      chain(
+        function(next) {
+          path.exists(repopath, next);
+        },
+
+        // clone branch if it doesn't exist
+        function(exists, next) {
+          if (exists) {
+            next();
+          } else {
+            chain(
+              function(next) {
+                mkdirp(branchpath, next);
+              },
+              function(error, next) {
+                exec(sprintf(
+                    'cd %s; git clone -b %s %s repo',
+                    branchpath,
+                    branch,
+                    config.repository.git.url),
+                  next);
+              }, function(error, out, err) {
+                if (!error) {
+                  next();
+                }
+              }
+            )();
+          }
+        },
+
+        // update branch
+        function update_branch() {
           chain(
             // git pull
             function(next) {
               exec(sprintf(
                   'cd %s; git pull origin',
-                  branchpath), 
+                  repopath), 
                 next);
             },
 
+            // exec_logger(sprintf('updated %s %s', config.name, branch)),
+
             // see if branch has a deploy configuration
             function(e, stdout, stderr, next) {
-              console.log('updated', config.name, branch);
-              path.exists(path.join(branchpath, 'deploy.json'), next);
+              path.exists(path.join(repopath, 'deploy.json'), next);
             },
 
             // build and launch server
             function(exists, next) {
               if (exists) {
-                var deployconfig = JSON.parse(fs.readFileSync(path.join(config.destination, 'branches', branch, 'deploy.json')));
+                var deployconfig = JSON.parse(fs.readFileSync(path.join(repopath, 'deploy.json')));
 
                 if (deployconfig.commands.build) {
                   chain(function(next) {
@@ -99,15 +148,16 @@ var update_branch = function(config, req, res, next) {
                     exec(
                       sprintf(
                         'cd %s; %s',
-                        branchpath,
+                        repopath,
                         deployconfig.commands.build),
                       next);
-                  }, function() {
+                  }, function(err, stdout, stderr) {
                     console.log(arguments);
+                    process.stderr.write(stderr); 
                     Array.prototype.slice.call(arguments,-1)[0].apply(null, Array.prototype.slice.call(arguments,0,-1));
                   },
                   chain(
-                    function(error, stdout, stderr, next, next) {
+                    function(error, stdout, stderr, next) {
                       if (error) {
                         console.log('failed', config.name, branch, stdout, stderr);
                       }
@@ -125,7 +175,8 @@ var update_branch = function(config, req, res, next) {
                             pid = parseInt(text, 10);
                           }
 
-                          console.log(pid, stdout);
+                          console.log(pid);
+                          process.stdout.write(stdout);
                           try {
                             pid = stdout.match(new RegExp(/\[(\d+)\].*/.source+pid+'.*'))[1];
                           } catch(e) {
@@ -155,7 +206,7 @@ var update_branch = function(config, req, res, next) {
                       exec(
                         sprintf(
                           'cd %s; forever stop %s; PIDFILE=%s; PORTFILE=%s; forever start --minUpTime 500 %s',
-                          branchpath,
+                          repopath,
                           foreverid,
                           path.join(branchpath, 'pid'),
                           path.join(branchpath, 'port'),
@@ -163,21 +214,14 @@ var update_branch = function(config, req, res, next) {
                         function(){});
                     },
 
-                    // update proxy url
+                    // update_branch proxy url
                     function() {
                       var port = fs.readFileSync(path.join(branchpath, 'port')), serverAddress;
 
                       if (port) {
-                        // serverAddress = proxyOptions.router['.*'];
-                        // delete proxyOptions.router['.*'];
-
                         proxyOptions.router['.*'+config.base_url+'/'+branch] = '127.0.0.1:' + port;
                         console.log(proxyOptions.router);
                         proxy.proxy.proxyTable.setRoutes(proxyOptions.router);
-
-                        // proxy.close();
-                        // proxy = httpProxy.createServer(proxyOptions);
-                        // proxy.listen(argparser.getOptions().port);
                       }
                     }
                   ))();
@@ -186,30 +230,13 @@ var update_branch = function(config, req, res, next) {
             }
           )();
         }
-
-        if (exists) {
-          update();
-        } else {
-          chain(function(next) {
-            exec(sprintf(
-                'cd %s/branches; git clone -b %s %s %s',
-                config.destination,
-                branch,
-                config.repository.git.url,
-                branch),
-              next);
-          }, function(error, out, err, next) {
-            if (!error) {
-              update();
-            }
-          })();
-        }
-      });
+      )();
     });
   });
 
-  if (res)
-    res.send('doing stuff');
+  if (res) {
+    res.redirect('/build');
+  }
 };
 
 server.config.apps.forEach(function(name) {
@@ -221,28 +248,21 @@ server.config.apps.forEach(function(name) {
       path.exists(path.join(appconfig.destination, 'repo'), function(exists) {
         if (!exists) {
           exec(sprintf('cd %s; git clone %s repo', appconfig.destination, appconfig.repository.git.url), function(error, stdout, stderr) {
-            update_branch.call(server, appconfig);
+            update.call(server, appconfig);
           });
         } else {
-          update_branch.call(server, appconfig);
+          update.call(server, appconfig);
         }
       });
+
+      mkdirp(path.join(appconfig.destination, 'branches'));
     }
   });
-  mkdirp(path.join(appconfig.destination, 'branches'));
 
-  updateserver.get('*', update_branch.bind(server, appconfig));
+  updateserver.get('*', update.bind(server, appconfig));
   updateserver.listen(0);
   proxyOptions.router['.*/' + appconfig.name + '/git'] = '127.0.0.1:' + updateserver.address().port;
   proxy.proxy.proxyTable.setRoutes(proxyOptions.router);
-  
-  // proxy.close();
-  // proxy = httpProxy.createServer(proxyOptions);
-  // proxy.listen(argparser.getOptions().port);
-});
-
-server.on('routes', function(routes) {
-  console.log('routes', routes);
 });
 
 server.get('*', function(req, res, next) {
