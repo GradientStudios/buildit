@@ -1,0 +1,12 @@
+{
+  "name": "buildit",
+  "version": "0.0.1",
+  "bin": "./bin/cli.js",
+  "dependencies": {
+    "express": "*",
+    "argparser": "*",
+    "mkdirp": "*",
+    "sprintf": "*",
+    "http-proxy": "*"
+  }
+}

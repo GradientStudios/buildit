@@ -1,0 +1,11 @@
+{
+  "name": "derby",
+  "destination": "/srv/derby",
+  "base_url": "/buildit/derby",
+  "repository": {
+    "git": {
+      "branches": "*",
+      "url": "https://github.com/GradientStudios/derpy-bullet.git"
+    }
+  }
+}

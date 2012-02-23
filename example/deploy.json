@@ -1,0 +1,7 @@
+{
+  "name": "derby",
+  "commands": {
+    "build": "waf configure install",
+    "daemon": "dist/test.js --pidfile ${PIDFILE} --portfile ${PORTFILE}"
+  }
+}
