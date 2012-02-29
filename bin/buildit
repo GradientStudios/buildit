@@ -160,6 +160,7 @@ var update = function(config, req, res, next) {
                     function(error, stdout, stderr, next) {
                       if (error) {
                         console.log('failed', config.name, branch, stdout, stderr);
+                        return;
                       }
                       else {
                         console.log('built', config.name, branch);
@@ -259,7 +260,7 @@ server.config.apps.forEach(function(name) {
     }
   });
 
-  updateserver.get('*', update.bind(server, appconfig));
+  updateserver.all('*', update.bind(server, appconfig));
   updateserver.listen(0);
   proxyOptions.router['.*/' + appconfig.name + '/git'] = '127.0.0.1:' + updateserver.address().port;
   proxy.proxy.proxyTable.setRoutes(proxyOptions.router);
