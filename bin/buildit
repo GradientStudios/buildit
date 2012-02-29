@@ -145,21 +145,20 @@ var update = function(config, req, res, next) {
                   chain(function(next) {
                     console.log('building', config.name, branch);
                     // build
-                    exec(
+                    var child = exec(
                       sprintf(
                         'cd %s; %s',
                         repopath,
                         deployconfig.commands.build),
                       next);
-                  }, function(err, stdout, stderr) {
-                    console.log(arguments);
-                    process.stderr.write(stderr); 
-                    Array.prototype.slice.call(arguments,-1)[0].apply(null, Array.prototype.slice.call(arguments,0,-1));
+                    var logstream = fs.createWriteStream(path.join(branchpath, 'build.log'));
+                    child.stdout.pipe(logstream);
+                    child.stderr.pipe(logstream);
                   },
                   chain(
                     function(error, stdout, stderr, next) {
                       if (error) {
-                        console.log('failed', config.name, branch, stdout, stderr);
+                        console.log('failed', config.name, branch);
                         return;
                       }
                       else {
@@ -180,9 +179,7 @@ var update = function(config, req, res, next) {
                           process.stdout.write(stdout);
                           try {
                             pid = stdout.match(new RegExp(/\[(\d+)\].*/.source+pid+'.*'))[1];
-                          } catch(e) {
-                            console.log('call next', next);
-                          }
+                          } catch(e) {}
 
                           next(pid);
                         });
