@@ -12,7 +12,7 @@ var fs = require('fs'),
     server = express.createServer(),
     proxyOptions,
     proxy,
-    jobQueue;
+    jobQueue = require('../lib/jobqueue').jobQueue();
 
 argparser = new argparser();
 argparser.addValueOptions(['port']);
@@ -26,8 +26,6 @@ proxyOptions = {
     
   }
 };
-
-jobQueue = [];
 
 server.listen(0);
 
@@ -87,158 +85,178 @@ var update = function(config, req, res, next) {
       }
     });
 
+    if (config.repository.git.branches != '*') {
+      branches = config.repository.git.branches;
+    }
+
     branches.forEach(function(branch) {
       var branchpath = path.join(config.destination, 'branches', branch),
           repopath = path.join(branchpath, 'repo');
 
-      chain(
-        function(next) {
-          path.exists(repopath, next);
-        },
+      jobQueue.add(function(completeJob) {
+        var chainnext = chain(
+          function(next) {
+            path.exists(repopath, next);
+          },
 
-        // clone branch if it doesn't exist
-        function(exists, next) {
-          if (exists) {
-            next();
-          } else {
+          // clone branch if it doesn't exist
+          function(exists, next) {
+            if (exists) {
+              next();
+            } else {
+              chain(
+                function(next) {
+                  mkdirp(branchpath, next);
+                },
+                function(error, next) {
+                  exec(sprintf(
+                      'cd %s; git clone -b %s %s repo',
+                      branchpath,
+                      branch,
+                      config.repository.git.url),
+                    next);
+                }, function(error, out, err) {
+                  if (!error) {
+                    next();
+                  }
+                }
+              )();
+            }
+          },
+
+          // update branch
+          function update_branch(next) {
             chain(
+              // git pull
               function(next) {
-                mkdirp(branchpath, next);
-              },
-              function(error, next) {
                 exec(sprintf(
-                    'cd %s; git clone -b %s %s repo',
-                    branchpath,
-                    branch,
-                    config.repository.git.url),
+                    'cd %s; git pull origin',
+                    repopath), 
                   next);
-              }, function(error, out, err) {
-                if (!error) {
+              },
+
+              // exec_logger(sprintf('updated %s %s', config.name, branch)),
+
+              // see if branch has a deploy configuration
+              function(e, stdout, stderr, next) {
+                path.exists(path.join(repopath, 'deploy.json'), next);
+              },
+
+              // build and launch server
+              function(exists, next) {
+                if (exists) {
+                  var deployconfig = JSON.parse(fs.readFileSync(path.join(repopath, 'deploy.json')));
+
+                  if (deployconfig.commands.build) {
+                    chain(function(next) {
+                      console.log('building', config.name, branch);
+                      // build
+                      var child = exec(
+                        sprintf(
+                          'cd %s; %s',
+                          repopath,
+                          deployconfig.commands.build),
+                        next);
+                      var logstream = fs.createWriteStream(path.join(branchpath, 'build.log'));
+                      child.stdout.pipe(logstream);
+                      child.stderr.pipe(logstream);
+                    },
+                    chain(
+                      function(error, stdout, stderr, next) {
+                        if (error) {
+                          console.log('failed', config.name, branch);
+                          return;
+                        }
+                        else {
+                          console.log('built', config.name, branch);
+                        }
+
+                        // get forever id
+                        exec('forever list', function(error, stdout, stderr) {
+                          fs.readFile(path.join(branchpath, 'pid'), function(error, text) {
+                            var pid, e;
+                            if (error) {
+                              pid = null;
+                            } else {
+                              pid = parseInt(text, 10);
+                            }
+
+                            console.log(pid);
+                            process.stdout.write(stdout);
+                            try {
+                              pid = stdout.match(new RegExp(/\[(\d+)\].*/.source+pid+'.*'))[1];
+                            } catch(e) {}
+
+                            next(pid);
+                          });
+                        });
+                      },
+
+                      // launch server
+                      function(foreverid, next) {
+                        var pidfile = path.join(branchpath, 'pid'),
+                            portfile = path.join(branchpath, 'port');
+                        console.log('launching', config.name, branch);
+
+                        function watch() {
+                          next();
+                        }
+
+                        if (server.watching[portfile]) {
+                          fs.unwatchFile(portfile, server.watching[portfile]);
+                        }
+
+                        fs.writeFileSync(pidfile, '');
+                        fs.writeFileSync(portfile, '');
+
+                        fs.watchFile(portfile, watch);
+                        server.watching[portfile] = watch;
+
+                        exec(
+                          sprintf(
+                            'cd %s; forever stop %s; PIDFILE=%s; PORTFILE=%s; forever start --minUpTime 500 %s',
+                            repopath,
+                            foreverid,
+                            path.join(branchpath, 'pid'),
+                            path.join(branchpath, 'port'),
+                            deployconfig.commands.daemon),
+                          function(){});
+                      },
+
+                      // update_branch proxy url
+                      function(next) {
+                        var port = fs.readFileSync(path.join(branchpath, 'port')), serverAddress;
+
+                        if (port) {
+                          proxyOptions.router['.*'+config.base_url+'/'+branch] = '127.0.0.1:' + port;
+                          console.log(proxyOptions.router);
+                          proxy.proxy.proxyTable.setRoutes(proxyOptions.router);
+                        }
+                        next();
+                      }
+                    ),
+                    next)();
+                  }
+                } else {
                   next();
                 }
+              },
+              function() {
+                next();
               }
             )();
           }
-        },
-
-        // update branch
-        function update_branch() {
-          chain(
-            // git pull
-            function(next) {
-              exec(sprintf(
-                  'cd %s; git pull origin',
-                  repopath), 
-                next);
-            },
-
-            // exec_logger(sprintf('updated %s %s', config.name, branch)),
-
-            // see if branch has a deploy configuration
-            function(e, stdout, stderr, next) {
-              path.exists(path.join(repopath, 'deploy.json'), next);
-            },
-
-            // build and launch server
-            function(exists, next) {
-              if (exists) {
-                var deployconfig = JSON.parse(fs.readFileSync(path.join(repopath, 'deploy.json')));
-
-                if (deployconfig.commands.build) {
-                  chain(function(next) {
-                    console.log('building', config.name, branch);
-                    // build
-                    var child = exec(
-                      sprintf(
-                        'cd %s; %s',
-                        repopath,
-                        deployconfig.commands.build),
-                      next);
-                    var logstream = fs.createWriteStream(path.join(branchpath, 'build.log'));
-                    child.stdout.pipe(logstream);
-                    child.stderr.pipe(logstream);
-                  },
-                  chain(
-                    function(error, stdout, stderr, next) {
-                      if (error) {
-                        console.log('failed', config.name, branch);
-                        return;
-                      }
-                      else {
-                        console.log('built', config.name, branch);
-                      }
-
-                      // get forever id
-                      exec('forever list', function(error, stdout, stderr) {
-                        fs.readFile(path.join(branchpath, 'pid'), function(error, text) {
-                          var pid, e;
-                          if (error) {
-                            pid = null;
-                          } else {
-                            pid = parseInt(text, 10);
-                          }
-
-                          console.log(pid);
-                          process.stdout.write(stdout);
-                          try {
-                            pid = stdout.match(new RegExp(/\[(\d+)\].*/.source+pid+'.*'))[1];
-                          } catch(e) {}
-
-                          next(pid);
-                        });
-                      });
-                    },
-
-                    // launch server
-                    function(foreverid, next) {
-                      var portfile = path.join(branchpath, 'port');
-                      console.log('launching', config.name, branch);
-
-                      function watch() {
-                        next();
-                      }
-
-                      if (server.watching[portfile]) {
-                        fs.unwatchFile(portfile, server.watching[portfile]);
-                      }
-                      fs.watchFile(portfile, watch);
-                      server.watching[portfile] = watch;
-
-                      exec(
-                        sprintf(
-                          'cd %s; forever stop %s; PIDFILE=%s; PORTFILE=%s; forever start --minUpTime 500 %s',
-                          repopath,
-                          foreverid,
-                          path.join(branchpath, 'pid'),
-                          path.join(branchpath, 'port'),
-                          deployconfig.commands.daemon),
-                        function(){});
-                    },
-
-                    // update_branch proxy url
-                    function() {
-                      var port = fs.readFileSync(path.join(branchpath, 'port')), serverAddress;
-
-                      if (port) {
-                        proxyOptions.router['.*'+config.base_url+'/'+branch] = '127.0.0.1:' + port;
-                        console.log(proxyOptions.router);
-                        proxy.proxy.proxyTable.setRoutes(proxyOptions.router);
-                      }
-                    }
-                  ))();
-                }
-              }
-            }
-          )();
-        }
-      )();
-    });
-  });
+        );
+        chainnext.parent = completeJob;
+        chainnext();
+      });
+    }); // end branches.forEach
+  }); // end exec
 
   if (res) {
     res.redirect('/build');
   }
-};
+}; // end update
 
 server.config.apps.forEach(function(name) {
   var appconfig = JSON.parse(fs.readFileSync('/usr/local/etc/buildit/apps/'+name+'.json')),
@@ -270,3 +288,5 @@ server.get('*', function(req, res, next) {
   console.log(req.url);
   next();
 });
+
+jobQueue.start();
