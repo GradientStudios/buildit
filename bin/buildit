@@ -11,7 +11,8 @@ var fs = require('fs'),
     sprintf = require('sprintf').sprintf,
     server = express.createServer(),
     proxyOptions,
-    proxy;
+    proxy,
+    jobQueue;
 
 argparser = new argparser();
 argparser.addValueOptions(['port']);
@@ -25,6 +26,8 @@ proxyOptions = {
     
   }
 };
+
+jobQueue = [];
 
 server.listen(0);
 
